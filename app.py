@@ -1,7 +1,7 @@
 import dash
 import dash_bootstrap_components as dbc
 import pandas as pd
-from dash import html, dcc, callback, Input, Output
+from dash import html, dcc, callback, Input, Output, State
 import plotly.express as px
 from sklearn.impute import SimpleImputer
 from sklearn.ensemble import RandomForestClassifier
@@ -23,18 +23,18 @@ apps_data['Size'] = apps_data['Size'].str.extract(r'(\d+\.?\d*)')[0].astype(floa
 apps_data['Size'].fillna(apps_data['Size'].mean(), inplace=True)
 imputer = SimpleImputer(strategy='median')
 apps_data['Rating'] = imputer.fit_transform(apps_data[['Rating']])
+apps_data['Weight'] = apps_data['Rating'] * apps_data['Installs']
 
 # Préparation des données pour le modèle de prédiction
 apps_data['Type'] = LabelEncoder().fit_transform(apps_data['Type'].fillna('Free'))
 apps_data['Content Rating'] = LabelEncoder().fit_transform(apps_data['Content Rating'].fillna('Everyone'))
 apps_data['Genres'] = apps_data['Genres'].fillna('Unknown').apply(lambda x: x.split(';')[0])
 
-features = ['Reviews', 'Size', 'Installs', 'Type', 'Content Rating']
+features = ['Reviews', 'Size', 'Installs', 'Type', 'Content Rating', 'Weight']
 target = 'Category'
 
 X = apps_data[features]
 y = apps_data[target]
-
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
 model = RandomForestClassifier(n_estimators=100, random_state=42)
 model.fit(X_train, y_train)
@@ -91,17 +91,21 @@ data_exploration_page = html.Div([
     html.Div(id='category-proportion-text', className='mb-4', style={'text-align': 'center', 'font-size': '24px'}),
     dcc.Graph(id='rating-pie-chart', className='mb-4'),
     html.H2('Top 10 Apps by Popularity', className='mt-4'),
-    dcc.Graph(id='top-apps-graph', className='mb-4')
+    dcc.Graph(id='top-apps-graph', className='mb-4'),
+    html.H2('Weight Distribution by Application', className='mt-4'),
+    dcc.Graph(id='weight-dist-chart', className='mb-4')
 ])
 
 @callback(
     [Output('category-proportion-text', 'children'),
      Output('rating-pie-chart', 'figure'),
-     Output('top-apps-graph', 'figure')],
+     Output('top-apps-graph', 'figure'),
+     Output('weight-dist-chart', 'figure')],
     Input('category-dropdown', 'value')
 )
 def update_graphs(selected_category):
     filtered_data = apps_data[apps_data['Category'] == selected_category]
+    filtered_data['Category_Weight'] = filtered_data['Rating'] * filtered_data['Installs']
 
     # Proportion de la catégorie dans les téléchargements
     total_installs = apps_data['Installs'].sum()
@@ -118,12 +122,40 @@ def update_graphs(selected_category):
     })
     fig2 = px.pie(rating_pie, names='Category', values='Count', title=f"Proportion of Good Ratings (>= 4.0) in {selected_category}")
 
-    # Top 10 applications par popularité
-    filtered_data['Popularity'] = filtered_data['Rating'] * filtered_data['Installs']
-    top_apps = filtered_data.nlargest(10, 'Popularity')
-    fig3 = px.bar(top_apps, x='App', y='Popularity', title='Top 10 Apps by Popularity')
+    # Top 10 applications par popularité dans la catégorie
+    top_apps = filtered_data.nlargest(10, 'Category_Weight')
+    fig3 = px.bar(top_apps, x='App', y='Category_Weight', title='Top 10 Apps by Popularity in Category')
 
-    return proportion_text, fig2, fig3
+    # Grouped bar chart for weight distribution by application rating
+    weight_by_rating = filtered_data.groupby('Rating')['Weight'].sum().reset_index()
+    fig4 = px.bar(weight_by_rating, x='Rating', y='Weight', title='Weight Distribution by Application Rating in Selected Category')
+
+    return proportion_text, fig2, fig3, fig4
+
+# Application Prediction Page
+
+@callback(
+    [Output('prediction-results', 'children'),
+     Output('selected-categories', 'children')],  # Ajout d'une sortie pour les catégories sélectionnées
+    Input('predict-button', 'n_clicks'),
+    State('category-checklist', 'value')
+)
+def update_prediction(n_clicks, categories):
+    if n_clicks > 0:
+        # Filtrer les données basées sur les catégories cochées
+        filtered_data = apps_data[apps_data['Category'].isin(categories)]
+        # S'assurer que nous ne présentons pas de doublons dans le tableau de résultats
+        filtered_data = filtered_data.drop_duplicates(subset=['App'])
+        # Calculer le poids pour le tri des applications
+        filtered_data['Weight'] = filtered_data['Rating'] * filtered_data['Installs']
+        # Sélectionner les 10 applications les plus "lourdes"
+        top_apps = filtered_data.nlargest(10, 'Weight')
+        # Créer un tableau pour afficher les résultats
+        table = dbc.Table.from_dataframe(top_apps[['App', 'Category', 'Rating', 'Installs', 'Weight']], striped=True, bordered=True, hover=True)
+        # Créer un texte pour afficher les catégories sélectionnées
+        categories_text = "Selected Categories: " + ", ".join(categories)
+        return table, categories_text
+    return html.Div(), "No categories selected"
 
 # Application Prediction Page
 application_prediction_page = html.Div([
@@ -136,26 +168,12 @@ application_prediction_page = html.Div([
         inline=True,
         className='mb-4'
     ),
-    html.H2('Top 5 Free Apps', className='mb-4'),
-    dcc.Graph(id='top-free-apps-graph', className='mb-4'),
-    html.H2('Top 5 Paid Apps', className='mb-4'),
-    dcc.Graph(id='top-paid-apps-graph', className='mb-4')
+    dbc.Button('Predict Applications', id='predict-button', n_clicks=0, className='mb-4'),
+    html.Div(id='prediction-results'),
+    html.Div(id='selected-categories', className='mt-4')  # Ajout d'un élément pour afficher les catégories sélectionnées
 ])
 
-@callback(
-    [Output('top-free-apps-graph', 'figure'),
-     Output('top-paid-apps-graph', 'figure')],
-    Input('category-checklist', 'value')
-)
-def update_prediction_graph(categories):
-    filtered_data = apps_data[apps_data['Category'].isin(categories)]
-    top_free = filtered_data[filtered_data['Type'] == 0].nlargest(5, 'Rating')
-    top_paid = filtered_data[filtered_data['Type'] == 1].nlargest(5, 'Rating')
-    
-    fig1 = px.bar(top_free, x='App', y='Rating', title='Top 5 Free Apps')
-    fig2 = px.bar(top_paid, x='App', y='Rating', title='Top 5 Paid Apps')
-    
-    return fig1, fig2
+
 
 # Sentiment Analysis Page
 sentiment_analysis_page = html.Div([
@@ -167,19 +185,15 @@ sentiment_analysis_page = html.Div([
         className='mb-4'
     ),
     dcc.Graph(id='sentiment-graph', className='mb-4'),
-    html.Div(id='sentiment-summary', className='mt-4'),
-    dcc.Input(id='search-input', type='text', placeholder='Search for an app', className='mb-4'),
-    html.Div(id='search-results', className='mt-4')
+    html.Div(id='sentiment-summary', className='mt-4')
 ])
 
 @callback(
     [Output('sentiment-graph', 'figure'),
-     Output('sentiment-summary', 'children'),
-     Output('search-results', 'children')],
-    [Input('app-dropdown', 'value'),
-     Input('search-input', 'value')]
+     Output('sentiment-summary', 'children')],
+    Input('app-dropdown', 'value')
 )
-def update_sentiment(selected_app, search_query):
+def update_sentiment(selected_app):
     data = reviews_data[reviews_data['App'] == selected_app]
     fig = px.histogram(data, x='Sentiment', title=f"Sentiment Distribution for {selected_app}")
     positive = (data['Sentiment'] == 'Positive').sum()
@@ -187,13 +201,7 @@ def update_sentiment(selected_app, search_query):
     neutral = (data['Sentiment'] == 'Neutral').sum()
     summary = f"Positive: {positive}, Negative: {negative}, Neutral: {neutral}"
     
-    if search_query:
-        search_results = reviews_data[reviews_data['App'].str.contains(search_query, case=False, na=False)]
-        search_results_div = html.Div([html.P(f"{row['App']} - {row['Sentiment']}") for index, row in search_results.iterrows()])
-    else:
-        search_results_div = html.Div()
-    
-    return fig, summary, search_results_div
+    return fig, summary
 
 # Callbacks pour changer de page
 @callback(
